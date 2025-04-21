@@ -17,7 +17,7 @@ await runEvaluation(
     },
     async process(file) {
       // do any processing here
-      return fs.readFileSync(file);
+      return fs.readFileSync(file, "utf-8");
     },
   },
   {

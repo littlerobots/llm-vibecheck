@@ -1,17 +1,23 @@
-import * as fs from "fs";
 import * as crypto from "crypto";
+import * as fs from "fs";
 import * as stream from "stream/promises";
+import { serialize } from "v8";
+import { ProcessorInput } from "./process.js";
 import { batch } from "./util.js";
 
-export interface ProcessedInput {
+export interface Input {
+  name: string;
   file: string;
+}
+
+export interface ProcessedInput extends Input {
   hash: string;
-  input: string;
   inputError?: Error;
+  preprocessed: boolean;
 }
 
 export interface Preprocessor {
-  process(file: string): Promise<Buffer | string>;
+  process(file: string): Promise<ProcessorInput | string>;
   canProcess?(file: string): boolean;
 }
 
@@ -32,9 +38,10 @@ async function hashInputs(inputDir: string): Promise<Array<ProcessedInput>> {
   );
   return files.map((f, i) => {
     return {
-      file: f.name,
+      name: f.name,
       hash: hashes[i],
-      input: `${f.parentPath}/${f.name}`,
+      file: `${f.parentPath}/${f.name}`,
+      preprocessed: false,
     };
   });
 }
@@ -42,7 +49,8 @@ async function hashInputs(inputDir: string): Promise<Array<ProcessedInput>> {
 async function preprocessInputs(
   inputDir: string,
   cacheDir: string,
-  preprocessor: Preprocessor
+  preprocessor: Preprocessor,
+  onProcessedFile: (name: string, cached: boolean, error?: unknown) => void
 ): Promise<Array<ProcessedInput>> {
   const files = fs
     .readdirSync(inputDir, { recursive: false, withFileTypes: true })
@@ -57,25 +65,37 @@ async function preprocessInputs(
 
   return await batch(files, async (file, i) => {
     const cachePath = `${cacheDir}/${hashes[i]}`;
+    let cached = true;
     if (!fs.existsSync(cachePath)) {
+      cached = false;
       try {
         const result = await preprocessor.process(
           `${file.parentPath}/${file.name}`
         );
-        fs.writeFileSync(cachePath, result);
+        let processorInput = result;
+        if (typeof result == "string") {
+          processorInput = {
+            input: result,
+          };
+        }
+        fs.writeFileSync(cachePath, serialize(processorInput));
       } catch (e: unknown) {
+        onProcessedFile(file.name, false, e);
         return {
-          file: file.name,
+          name: file.name,
           hash: hashes[i],
-          input: `${file.parentPath}/${file.name}`,
+          file: `${file.parentPath}/${file.name}`,
           inputError: e as Error,
+          preprocessed: true,
         };
       }
     }
+    onProcessedFile(file.name, cached);
     return {
-      file: file.name,
+      name: file.name,
       hash: hashes[i],
-      input: `${cacheDir}/${hashes[i]}`,
+      file: `${cacheDir}/${hashes[i]}`,
+      preprocessed: true,
     };
   });
 }
@@ -83,11 +103,21 @@ async function preprocessInputs(
 export async function preprocess(
   inputDir: string,
   cacheDir: string,
+  onProcessedFile: (
+    name: string,
+    cached: boolean,
+    error?: unknown
+  ) => void = () => {},
   preprocessor: Preprocessor | undefined
 ) {
   if (!preprocessor) {
     return await hashInputs(inputDir);
   } else {
-    return await preprocessInputs(inputDir, cacheDir, preprocessor);
+    return await preprocessInputs(
+      inputDir,
+      cacheDir,
+      preprocessor,
+      onProcessedFile
+    );
   }
 }

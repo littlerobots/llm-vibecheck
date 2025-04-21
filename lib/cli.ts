@@ -1,29 +1,42 @@
-import yargs from "yargs/yargs";
 import * as fs from "fs";
-import { preprocess, type Preprocessor } from "./input.js";
-import { batch } from "./util.js";
-import {
-  processCached,
-  PromptConfig,
-  Processor,
-  Evaluator,
-} from "./process.js";
-import * as csvWriter from "csv-writer";
+import yargs from "yargs/yargs";
 import yoctoSpinner from "yocto-spinner";
+import { Input, preprocess, type Preprocessor } from "./input.js";
+import {
+  Evaluator,
+  getProcessorInput,
+  processCached,
+  Processor,
+  ProcessorInput,
+  ProcessResult,
+  PromptConfig,
+} from "./process.js";
+import { batch } from "./util.js";
+import { CsvOutputWriter, OutputWriter } from "./writer.js";
+
+export interface CliResult {
+  config: PromptConfig[];
+  inputs: Input[];
+  processorInputs: ProcessorInput[];
+  results: ProcessResult[][];
+}
 
 export class Cli {
-  processsor: Processor;
-  preprocessor: Preprocessor | undefined;
-  evaluator: Evaluator | undefined;
+  private processsor: Processor;
+  private preprocessor: Preprocessor | undefined;
+  private evaluator: Evaluator | undefined;
+  private writer: OutputWriter;
 
   constructor(
     processsor: Processor,
     preprocessor?: Preprocessor,
-    evaluator?: Evaluator
+    evaluator?: Evaluator,
+    writer: OutputWriter | undefined | null = new CsvOutputWriter()
   ) {
     this.processsor = processsor;
     this.preprocessor = preprocessor;
     this.evaluator = evaluator;
+    this.writer = writer;
   }
 
   async run(args: string[]) {
@@ -43,8 +56,9 @@ export class Cli {
         },
         output: {
           alias: "o",
-          describe: "CSV output file",
-          demandOption: true,
+          describe: "Output file",
+          demandOption: !!this.writer,
+          hide: !this.writer,
           type: "string",
         },
         cache: {
@@ -84,19 +98,27 @@ export class Cli {
     const inputs = await preprocess(
       argv.input,
       `${argv.cache}/input`,
+      (name, cached, error) => {
+        const spinnerText = spinner.text;
+        let message = name;
+        if (cached) {
+          message += " (cached)";
+        } else if (error) {
+          message += `: ${(error as Error).message}`;
+        }
+        if (error) {
+          spinner.error(message);
+        } else {
+          spinner.info(message);
+        }
+        spinner.start(spinnerText);
+      },
       this.preprocessor
     );
-    const errors = inputs.filter((input) => !!input.inputError);
+
     const processedInputs = inputs.filter(
       (input) => input.inputError == undefined
     );
-    if (errors.length > 0) {
-      spinner.warning("Error processing some inputs:");
-      errors.map((input) =>
-        console.warn(`   ${input.file}: ${input.inputError?.message}`)
-      );
-      spinner.start();
-    }
 
     if (processedInputs.length == 0) {
       spinner.error("No input files to process");
@@ -115,49 +137,44 @@ export class Cli {
         )
       );
     });
-
-    spinner.success("All done!");
-
-    // assume / require that every prompt returns the same keys for every row
-    const promptKeys = prompts.map((p, index) => {
-      const firstRow =
-        rows.length > 0 && rows[0].length > 0 ? rows[0][index] : [];
-      return [
-        ...Object.keys(firstRow)
-          .filter((k) => !k.startsWith("eval_"))
-          .sort((a, b) => a.localeCompare(b)),
-        ...Object.keys(firstRow)
-          .filter((k) => k.startsWith("eval_"))
-          .sort((a, b) => a.localeCompare(b)),
-      ];
-    });
-
-    const headers = [
-      "file",
-      "input",
-      ...promptKeys.flatMap((keys, index) =>
-        keys.map((k) => {
-          const promptName = prompts[index].name || `p${index}`;
-          return `${promptName}_${k}`;
-        })
-      ),
-    ];
-    const writer = csvWriter.createArrayCsvWriter({
-      header: headers,
-      path: argv.output,
-    });
-    await writer.writeRecords(
-      rows.map((r, index) => {
-        return [
-          processedInputs[index].file,
-          fs.readFileSync(processedInputs[index].input, "utf-8"),
-          ...r.flatMap((sr, index) => {
-            const keys = promptKeys[index];
-            return keys.map((k) => sr[k] || "");
-          }),
-        ];
-      })
+    const cachedResults = rows
+      .flatMap((v) =>
+        v.reduce((acc, v) => {
+          if (v.cached) {
+            return acc + 1;
+          } else {
+            return acc;
+          }
+        }, 0)
+      )
+      .reduce((acc, v) => acc + v, 0);
+    spinner.success(
+      `All done! Ran ${
+        rows.length * prompts.length
+      } prompts, ${cachedResults} from cache.`
     );
+
+    const cliResult: CliResult = {
+      config: prompts,
+      inputs: processedInputs.map((input) => ({
+        file: input.file,
+        name: input.name,
+      })),
+      processorInputs: processedInputs.map((input) => getProcessorInput(input)),
+      results: rows,
+    };
+
+    if (this.writer) {
+      this.writer.write(
+        argv.output,
+        cliResult.config,
+        cliResult.inputs,
+        cliResult.processorInputs,
+        cliResult.results
+      );
+    }
+
+    return cliResult;
   }
 
   private createCacheDirs(cacheDir: string) {

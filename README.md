@@ -46,7 +46,7 @@ When you run the cli without any arguments the output will be similar to this:
 Options:
   -i, --input   Directory with input files                   [string] [required]
   -c, --config  Prompt config json file                      [string] [required]
-  -o, --output  CSV output file                              [string] [required]
+  -o, --output  Output file                                  [string] [required]
       --cache   Directory used for caching inputs and outputs
             [string] [default: "/Users/you/myproject/.cache"]
       --help    Show help                                              [boolean]

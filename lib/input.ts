@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as path from "path";
 import * as stream from "stream/promises";
 import { serialize } from "v8";
 import { ProcessorInput } from "./process.js";
@@ -29,10 +30,30 @@ async function hashFile(path: string) {
   return hash.digest("hex");
 }
 
-async function hashInputs(inputDir: string): Promise<Array<ProcessedInput>> {
-  const files = fs
-    .readdirSync(inputDir, { recursive: false, withFileTypes: true })
-    .filter((f) => f.isFile());
+function sampleArrayFn<T>(size: number | undefined) {
+  if (size === undefined || size == 0) {
+    return (a: T[]) => a;
+  } else {
+    return (a: T[]) => {
+      const shuffled = [...a];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      return shuffled.slice(0, size);
+    };
+  }
+}
+
+async function hashInputs(
+  inputDir: string,
+  sampleFn: (entries: fs.Dirent[]) => fs.Dirent[]
+): Promise<Array<ProcessedInput>> {
+  const files = sampleFn(
+    fs
+      .readdirSync(inputDir, { recursive: true, withFileTypes: true })
+      .filter((f) => f.isFile())
+  );
   const hashes = await Promise.all(
     files.map((f) => hashFile(`${f.parentPath}/${f.name}`))
   );
@@ -50,15 +71,18 @@ async function preprocessInputs(
   inputDir: string,
   cacheDir: string,
   preprocessor: Preprocessor,
+  sampleFn: (entries: fs.Dirent[]) => fs.Dirent[],
   onProcessedFile: (name: string, cached: boolean, error?: unknown) => void
 ): Promise<Array<ProcessedInput>> {
-  const files = fs
-    .readdirSync(inputDir, { recursive: false, withFileTypes: true })
-    .filter(
-      (f) =>
-        f.isFile() &&
-        preprocessor?.canProcess?.call(preprocessor, f.name) != false
-    );
+  const files = sampleFn(
+    fs
+      .readdirSync(inputDir, { recursive: true, withFileTypes: true })
+      .filter(
+        (f) =>
+          f.isFile() &&
+          preprocessor?.canProcess?.call(preprocessor, f.name) != false
+      )
+  );
   const hashes = await Promise.all(
     files.map((f) => hashFile(`${f.parentPath}/${f.name}`))
   );
@@ -80,9 +104,16 @@ async function preprocessInputs(
         }
         fs.writeFileSync(cachePath, serialize(processorInput));
       } catch (e: unknown) {
-        onProcessedFile(file.name, false, e);
+        onProcessedFile(
+          path.relative(inputDir, path.resolve(file.parentPath, file.name)),
+          false,
+          e
+        );
         return {
-          name: file.name,
+          name: path.relative(
+            inputDir,
+            path.resolve(file.parentPath, file.name)
+          ),
           hash: hashes[i],
           file: `${file.parentPath}/${file.name}`,
           inputError: e as Error,
@@ -90,9 +121,12 @@ async function preprocessInputs(
         };
       }
     }
-    onProcessedFile(file.name, cached);
+    onProcessedFile(
+      path.relative(inputDir, path.resolve(file.parentPath, file.name)),
+      cached
+    );
     return {
-      name: file.name,
+      name: path.relative(inputDir, path.resolve(file.parentPath, file.name)),
       hash: hashes[i],
       file: `${cacheDir}/${hashes[i]}`,
       preprocessed: true,
@@ -108,15 +142,17 @@ export async function preprocess(
     cached: boolean,
     error?: unknown
   ) => void = () => {},
-  preprocessor: Preprocessor | undefined
+  preprocessor: Preprocessor | undefined,
+  sample?: number
 ) {
   if (!preprocessor) {
-    return await hashInputs(inputDir);
+    return await hashInputs(inputDir, sampleArrayFn(sample));
   } else {
     return await preprocessInputs(
       inputDir,
       cacheDir,
       preprocessor,
+      sampleArrayFn(sample),
       onProcessedFile
     );
   }

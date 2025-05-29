@@ -66,6 +66,11 @@ export class Cli {
           default: `${process.cwd()}/.cache`,
           type: "string",
         },
+        sample: {
+          describe: "Sample to take from the input set",
+          default: undefined,
+          type: "number",
+        },
       })
       .version(false)
       .help()
@@ -109,11 +114,12 @@ export class Cli {
         if (error) {
           spinner.error(message);
         } else {
-          spinner.info(message);
+          spinner.success(message);
         }
         spinner.start(spinnerText);
       },
-      this.preprocessor
+      this.preprocessor,
+      argv.sample > 0 ? argv.sample : undefined
     );
 
     const processedInputs = inputs.filter(
